@@ -1,0 +1,188 @@
+\documentclass[conference]{IEEEtran}
+\usepackage[main=portuguese,provide=*]{babel}
+\usepackage{cite}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{graphicx}
+\graphicspath{{./}{saida/}{imagens/}{img/}}
+\usepackage{textcomp}
+\usepackage{xcolor}
+\usepackage[hidelinks]{hyperref}
+
+\begin{document}
+
+\title{Scanner de Documentos via Transformação de Perspectiva com OpenCV}
+
+\author{
+    \IEEEauthorblockN{
+        \begin{tabular}{c}
+            Gustavo Gabriel Ripka \\
+            GRR20203935
+        \end{tabular}
+        \qquad \qquad
+        \begin{tabular}{c}
+            Arthur Barreto Godoi \\
+            GRR20224377
+        \end{tabular}
+    }
+    \vspace{0.2cm}
+    \IEEEauthorblockA{
+        \textit{Departamento de Informática} \\
+        \textit{Universidade Federal do Paraná -- UFPR}\\
+        Curitiba, Brasil
+    }
+}
+
+\maketitle
+
+\begin{abstract}
+Este trabalho descreve a implementação de uma aplicação simples de transformação de perspectiva usando OpenCV, no contexto da disciplina de Visão Computacional. A aplicação escolhida foi um \emph{scanner de documentos}: a partir de uma foto comum de um documento tirada com câmera de celular, em ângulo e com sombras, o sistema detecta automaticamente as bordas do documento, calcula a transformação de perspectiva que mapeia o quadrilátero detectado para um retângulo e gera uma imagem endireitada, com aparência de digitalização. O pipeline inclui pré-processamento (conversão para tons de cinza e suavização gaussiana), detecção de bordas com Canny e dilatação morfológica, busca do maior contorno quadrilátero com aproximação poligonal, correção da homografia com \texttt{getPerspectiveTransform} e \texttt{warpPerspective} e, por fim, pós-processamento com correção de sombras e limiarização adaptativa para produzir uma versão em preto e branco com aparência de escaneamento.
+\end{abstract}
+
+\begin{IEEEkeywords}
+transformação de perspectiva, homografia, OpenCV, detecção de contornos, scanner de documentos.
+\end{IEEEkeywords}
+
+\section{Introdução}
+
+A digitalização de documentos é uma tarefa presente no cotidiano: enviar um documento para uma repartição, arquivar uma prova ou compartilhar um contrato assinado. O caminho tradicional é usar um scanner dedicado, que produz imagens com o documento perfeitamente alinhado e iluminado. Nem sempre há um scanner disponível, porém, e a alternativa mais imediata é fotografar o documento com o celular. O problema é que uma foto tirada à mão quase nunca fica ``reta'': o documento aparece inclinado em relação ao plano da imagem, com bordas irregulares, e a iluminação do ambiente gera sombras que dificultam a leitura.
+
+Esse cenário caracteriza um problema clássico de visão computacional: dado que o documento é um plano retangular visto de um ponto de vista inclinado, é possível ``endireitá-lo'' computacionalmente estimando a transformação de perspectiva (homografia) que leva o quadrilátero ocupado pelo documento na foto a um retângulo frontal. O objetivo deste trabalho é definir e implementar uma aplicação simples que realiza essa tarefa com OpenCV: um \emph{scanner de documentos} que recebe uma foto qualquer e devolve uma imagem do documento endireitado, com as sombras atenuadas e, opcionalmente, uma versão em preto e branco com aparência de digitalização.
+
+O trabalho foi desenvolvido em dupla e o código-fonte está disponível publicamente em:
+\begin{center}
+\url{https://github.com/gg-gustavo/doc-scanner}
+\end{center}
+
+\section{Fundamentação Teórica}
+
+\subsection{Transformação de perspectiva}
+
+A transformação de perspectiva, também chamada de homografia 2D, é uma transformação projetiva que relaciona dois planos no espaço. Quando um plano é fotografado por uma câmera, sua aparência na imagem é uma versão projetada do plano original; a correspondência entre os pontos do plano real e os pontos da imagem pode ser descrita por uma matriz $H$ de dimensão $3 \times 3$, definida a menos de um fator de escala \cite{hartley2004}.
+
+Um ponto homogêneo do plano de origem $(x, y, 1)$ é mapeado para um ponto do plano de destino $(x', y')$ da seguinte forma:
+\begin{equation}
+\begin{bmatrix}
+\tilde{x}' \\
+\tilde{y}' \\
+\tilde{w}'
+\end{bmatrix}
+=
+\begin{bmatrix}
+h_{11} & h_{12} & h_{13} \\
+h_{21} & h_{22} & h_{23} \\
+h_{31} & h_{32} & h_{33}
+\end{bmatrix}
+\begin{bmatrix}
+x \\
+y \\
+1
+\end{bmatrix},
+\qquad
+x' = \frac{\tilde{x}'}{\tilde{w}'}, \;
+y' = \frac{\tilde{y}'}{\tilde{w}'}
+\label{eq:homografia}
+\end{equation}
+
+A divisão por $\tilde{w}'$ é o que diferencia a homografia das transformações afins: é ela que permite modelar efeitos de perspectiva, em que retas paralelas no plano original aparecem convergentes na imagem.
+
+\subsection{Determinação da homografia}
+
+A matriz $H$ possui 9 elementos, mas como ela é definida a menos de um fator de escala, possui 8 graus de liberdade. Cada correspondência entre um ponto de origem $(x_i, y_i)$ e um ponto de destino $(x'_i, y'_i)$ fornece duas equações lineares nas incógnitas $h_{ij}$. Logo, um mínimo de 4 correspondências ponto a ponto (não colineares) são suficientes para determinar $H$ completamente.
+
+No caso do scanner de documentos, essas 4 correspondências são naturais: os 4 cantos do documento na foto (origem) e os 4 cantos do retângulo de destino com as dimensões desejadas. A partir de $H$, cada pixel da imagem de saída pode ser mapeado de volta para sua posição na imagem original, o que caracteriza a operação de \emph{warping} perspectivo implementada por \texttt{warpPerspective} \cite{bradski2000}.
+
+\section{Metodologia}
+
+A aplicação foi implementada em Python com OpenCV e organizada como um pipeline de etapas, descritas a seguir.
+
+\subsection{Pré-processamento}
+
+A imagem de entrada é convertida para tons de cinza com \texttt{cv2.cvtColor} e suavizada com um filtro gaussiano (\texttt{cv2.GaussianBlur}). A suavização reduz ruídos e detalhes de alta frequência (textura do papel, grão da câmera) que poderiam gerar falsas bordas na etapa seguinte.
+
+\subsection{Detecção de bordas}
+
+Sobre a imagem suavizada é aplicado o detector de bordas de Canny (\texttt{cv2.Canny}). Em seguida, uma dilatação morfológica (\texttt{cv2.dilate}) engrossa as bordas detectadas, fechando pequenas descontinuidades no contorno do documento e facilitando a extração de um contorno fechado na etapa de contornos.
+
+\subsection{Busca do quadrilátero do documento}
+
+Os contornos da imagem de bordas são extraídos com \texttt{cv2.findContours} e ordenados por área, do maior para o menor. Percorrendo essa lista, procura-se o primeiro contorno que possa ser aproximado por um polígono de 4 vértices usando \texttt{cv2.approxPolyDP} (algoritmo de Douglas-Peucker, que simplifica o contorno mantendo uma tolerância proporcional ao seu perímetro). Quando um quadrilátero de área suficientemente grande é encontrado, ele é assumido como sendo a borda do documento.
+
+\subsection{Ordenação dos cantos}
+
+Os 4 pontos do quadrilátero podem vir em qualquer ordem. Eles são então reordenados de forma consistente (superior esquerdo, superior direito, inferior direito e inferior esquerdo) usando somas e diferenças das coordenadas: o ponto com menor soma $x + y$ é o canto superior esquerdo, o de maior soma é o inferior direito; o de menor diferença $y - x$ é o superior direito e o de maior diferença é o inferior esquerdo.
+
+\subsection{Correção de perspectiva}
+
+Definidos os 4 cantos de origem e os 4 cantos de destino (um retângulo cujas dimensões são calculadas a partir das larguras e alturas médias das bordas do quadrilátero), a homografia é obtida com \texttt{cv2.getPerspectiveTransform} e aplicada com \texttt{cv2.warpPerspective}, produzindo a imagem do documento ``endireitado'', vista de frente.
+
+\subsection{Pós-processamento: aparência de scan}
+
+A imagem endireitada ainda carrega as sombras da foto original. Para removê-las, adotou-se a seguinte estratégia de correção de sombra: aplica-se uma operação morfológica de fechamento (\texttt{cv2.morphologyEx} com kernel grande) à imagem em tons de cinza, o que produz uma estimativa do fundo/iluminação da página; em seguida, a imagem original é dividida por essa versão de fundo, normalizando a iluminação e ``apagando'' as sombras suaves. A partir do resultado corrigido, uma limiarização adaptativa (\texttt{cv2.adaptiveThreshold}) gera uma versão em preto e branco com aparência de documento escaneado.
+
+\section{Experimentos e Resultados}
+
+Os experimentos foram realizados sobre uma fotografia de uma prova (PROVA P2 da disciplina de Design de Software) tirada com câmera de celular, com o documento posicionado de forma inclinada em relação à câmera e com sombras visíveis nas bordas da folha.
+
+A Figura~\ref{fig:contorno} mostra o resultado da etapa de detecção: o contorno do quadrilátero correspondente ao documento é destacado sobre a imagem original, com marcação nos 4 cantos detectados. A detecção funcionou corretamente mesmo com a inclinação da folha, pois as bordas do papel de fundo claro sobre a superfície escura produzem um gradiente forte e contínuo, bem capturado pelo detector de Canny.
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=0.85\linewidth]{contorno_detectado.png}
+    \caption{Quadrilátero do documento detectado sobre a foto original.}
+    \label{fig:contorno}
+\end{figure}
+
+A Figura~\ref{fig:corrigido} apresenta a imagem após a correção de perspectiva: o documento aparece endireitado, como se tivesse sido fotografado de frente, com as proporções da folha preservadas.
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=0.85\linewidth]{documento_corrigido.png}
+    \caption{Documento após a correção de perspectiva (\texttt{warpPerspective}).}
+    \label{fig:corrigido}
+\end{figure}
+
+Por fim, a Figura~\ref{fig:scan} mostra o resultado do pós-processamento: com a correção de sombras e a limiarização adaptativa, o fundo do papel torna-se uniformemente branco e o texto ganha contraste, resultando em uma imagem muito próxima do que se obteria com um scanner convencional.
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=0.85\linewidth]{documento_scan.png}
+    \caption{Resultado final em preto e branco, com sombras removidas.}
+    \label{fig:scan}
+\end{figure}
+
+De forma qualitativa, o pipeline cumpre o objetivo proposto: a partir de uma foto simples tirada à mão, o sistema produz uma imagem do documento endireitada, com as sombras das bordas removidas e o texto legível, sem necessidade de intervenção manual na definição dos cantos.
+
+\section{Discussão}
+
+Apesar dos bons resultados no caso de teste, a abordagem tem limitações conhecidas:
+
+\begin{itemize}
+    \item \textbf{Fundo confuso:} a detecção do quadrilátero assume que o maior contorno aproximadamente retangular é o documento. Se o fundo contém outros objetos com contornos retos e grandes (outras folhas, mesas com listras, caixas), a detecção pode selecionar o quadrilátero errado ou falhar em isolar o documento.
+    \item \textbf{Iluminação extrema:} sombras muito duras ou brilhos especulares sobre o papel podem quebrar o contorno detectado pelo Canny, mesmo após a dilatação, impedindo o fechamento do quadrilátero. Já a correção de sombras por divisão de fundo funciona bem para sombras suaves, mas pode amplificar ruído em regiões de sombra muito intensa.
+    \item \textbf{Documento sem bordas visíveis:} páginas em que o documento tem cor muito próxima à da superfície de apoio produzem gradientes fracos nas bordas, dificultando a detecção automática.
+\end{itemize}
+
+Como melhorias futuras, seria possível usar a versão em cores da imagem para ajudar na segmentação do papel, aplicar detecção de cantos mais robusta (por exemplo, restringindo a busca a contornos convexos) ou adicionar realce de contraste adaptativo (CLAHE) antes da binarização.
+
+\section{Conclusão}
+
+Este trabalho implementou uma aplicação simples e funcional de transformação de perspectiva com OpenCV, no formato de um scanner de documentos. O pipeline completo -- pré-processamento, detecção de bordas, busca do quadrilátero, correção de homografia e pós-processamento -- endireita automaticamente fotos de documentos tiradas à mão e produz uma versão com aparência de digitalização, com sombras removidas. Além do resultado prático, o desenvolvimento permitiu consolidar conceitos centrais da disciplina, como homografias 2D, representação de pontos em coordenadas homogêneas, detecção de contornos e operações morfológicas. O código está disponível em \url{https://github.com/gg-gustavo/doc-scanner}.
+
+\section*{Disponibilidade}
+
+O código-fonte da aplicação, incluindo os scripts do pipeline e as imagens de teste, está disponível em:
+\begin{center}
+\url{https://github.com/gg-gustavo/doc-scanner}
+\end{center}
+
+\begin{thebibliography}{2}
+
+\bibitem{bradski2000}
+G. Bradski, ``The OpenCV Library,'' \emph{Dr. Dobb's Journal of Software Tools}, 2000.
+
+\bibitem{hartley2004}
+R. Hartley and A. Zisserman, \emph{Multiple View Geometry in Computer Vision}, 2nd ed. Cambridge University Press, 2004.
+
+\end{thebibliography}
+
+\end{document}
